@@ -193,7 +193,7 @@ impl Command {
         let network = self.start_network(network_config, &ctx.task_executor, ()).await?;
         info!(target: "reth::cli", peer_id = %network.peer_id(), local_addr = %network.local_addr(), "Connected to P2P network");
 
-        info!(target: "reth::cli", peer_id = format!("{:?}", network.peer_id()), "Network Peer ID (copy for trusted-peer) ");
+        info!(target: "reth::cli", peer_id = format!("{:?}", network.peer_id()), "Network Peer ID (copy for trusted-peer)");
 
         let transaction_pool = reth_transaction_pool::Pool::eth_pool(
             EthTransactionValidator::new(shareable_db.clone(), Arc::clone(&self.chain)),
@@ -450,7 +450,7 @@ impl Command {
         // try to look up the header in the database
         if let Some(header) = header {
             info!(target: "reth::cli", ?tip, "Successfully looked up tip block in the database");
-            return Ok(header.seal_slow());
+            return Ok(header.seal_slow())
         }
 
         info!(target: "reth::cli", ?tip, "Fetching tip block from the network.");
@@ -458,7 +458,7 @@ impl Command {
             match get_single_header(fetch_client.clone(), tip).await {
                 Ok(tip_header) => {
                     info!(target: "reth::cli", ?tip, "Successfully fetched tip");
-                    return Ok(tip_header);
+                    return Ok(tip_header)
                 }
                 Err(error) => {
                     error!(target: "reth::cli", %error, "Failed to fetch the tip. Retrying...");
