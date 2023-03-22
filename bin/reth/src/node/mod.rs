@@ -191,7 +191,7 @@ impl Command {
         let network_config =
             self.load_network_config(&config, Arc::clone(&db), ctx.task_executor.clone());
         let network = self.start_network(network_config, &ctx.task_executor, ()).await?;
-        info!(target: "reth::cli", peer_id = %network.peer_id(), local_addr = %network.local_addr(), "Connected to P2P network");
+        info!(target: "reth::cli", peer_id = ?network.peer_id(), local_addr = %network.local_addr(), "Connected to P2P network");
 
         let transaction_pool = reth_transaction_pool::Pool::eth_pool(
             EthTransactionValidator::new(shareable_db.clone(), Arc::clone(&self.chain)),
