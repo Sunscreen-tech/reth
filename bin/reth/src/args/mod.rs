@@ -11,3 +11,6 @@ pub use rpc_server_args::RpcServerArgs;
 /// DebugArgs struct for debugging purposes
 mod debug_args;
 pub use debug_args::DebugArgs;
+
+mod multi_use_args;
+pub use multi_use_args::{get_secret_key, SecretKeyError};
