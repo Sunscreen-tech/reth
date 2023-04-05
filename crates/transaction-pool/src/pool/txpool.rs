@@ -17,7 +17,7 @@ use crate::{
     ValidPoolTransaction, U256,
 };
 use fnv::FnvHashMap;
-use reth_primitives::{TxHash, H256};
+use reth_primitives::{constants::MIN_PROTOCOL_BASE_FEE, TxHash, H256};
 use std::{
     cmp::Ordering,
     collections::{btree_map::Entry, hash_map, BTreeMap, HashMap},
@@ -25,13 +25,6 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
     sync::Arc,
 };
-
-/// The minimal value the basefee can decrease to.
-///
-/// The `BASE_FEE_MAX_CHANGE_DENOMINATOR` <https://eips.ethereum.org/EIPS/eip-1559> is `8`, or 12.5%.
-/// Once the base fee has dropped to `7` WEI it cannot decrease further because 12.5% of 7 is less
-/// than 1.
-pub(crate) const MIN_PROTOCOL_BASE_FEE: u128 = 7;
 
 /// A pool that manages transactions.
 ///
@@ -159,6 +152,14 @@ impl<T: TransactionOrdering> TxPool<T> {
         txs: impl IntoIterator<Item = TxHash> + 'a,
     ) -> impl Iterator<Item = Arc<ValidPoolTransaction<T::Transaction>>> + 'a {
         txs.into_iter().filter_map(|tx| self.get(&tx))
+    }
+
+    /// Returns all transactions sent from the given sender.
+    pub(crate) fn get_transactions_by_sender(
+        &self,
+        sender: SenderId,
+    ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
+        self.all_transactions.txs_iter(sender).map(|(_, tx)| Arc::clone(&tx.transaction)).collect()
     }
 
     /// Updates the entire pool after a new block was mined.
@@ -688,8 +689,6 @@ impl<T: PoolTransaction> AllTransactions<T> {
 
     /// Returns an iterator over all transactions for the given sender, starting with the lowest
     /// nonce
-    #[cfg(test)]
-    #[allow(unused)]
     pub(crate) fn txs_iter(
         &self,
         sender: SenderId,

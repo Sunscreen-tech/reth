@@ -2,15 +2,11 @@
 use chain::{BlockChainId, Chain, ForkBlock};
 use reth_db::{cursor::DbCursorRO, database::Database, tables, transaction::DbTx};
 use reth_interfaces::{
-    blockchain_tree::BlockStatus,
-    consensus::Consensus,
-    events::{NewBlockNotifications, NewBlockNotificationsSender},
-    executor::Error as ExecError,
-    Error,
+    blockchain_tree::BlockStatus, consensus::Consensus, events::NewBlockNotifications,
+    executor::Error as ExecError, Error,
 };
 use reth_primitives::{
-    BlockHash, BlockNumHash, BlockNumber, Hardfork, SealedBlock, SealedBlockWithSenders,
-    SealedHeader, U256,
+    BlockHash, BlockNumber, Hardfork, SealedBlock, SealedBlockWithSenders, SealedHeader, U256,
 };
 use reth_provider::{post_state::PostState, ExecutorFactory, HeaderProvider, Transaction};
 use std::{
@@ -35,6 +31,7 @@ pub use shareable::ShareableBlockchainTree;
 
 pub mod post_state_data;
 pub use post_state_data::{PostStateData, PostStateDataRef};
+use reth_interfaces::events::NewBlockNotificationSink;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Tree of chains and its identifications.
@@ -89,7 +86,7 @@ pub struct BlockchainTree<DB: Database, C: Consensus, EF: ExecutorFactory> {
     /// Tree configuration
     config: BlockchainTreeConfig,
     /// Unbounded channel for sending new block notifications.
-    new_block_notication_sender: NewBlockNotificationsSender,
+    new_block_notification_sender: NewBlockNotificationSink,
 }
 
 /// A container that wraps chains and block indices to allow searching for block hashes across all
@@ -105,6 +102,7 @@ impl<DB: Database, C: Consensus, EF: ExecutorFactory> BlockchainTree<DB, C, EF> 
     /// Create a new blockchain tree.
     pub fn new(
         externals: TreeExternals<DB, C, EF>,
+        new_block_notification_sender: NewBlockNotificationSink,
         config: BlockchainTreeConfig,
     ) -> Result<Self, Error> {
         let max_reorg_depth = config.max_reorg_depth();
@@ -128,11 +126,6 @@ impl<DB: Database, C: Consensus, EF: ExecutorFactory> BlockchainTree<DB, C, EF> 
                 last_canonical_hashes.last().cloned().unwrap_or_default()
             };
 
-        // size of the broadcast is double of max reorg depth because at max reorg depth we can have
-        // send at least N block at the time.
-        let (new_block_notication_sender, _) =
-            tokio::sync::broadcast::channel(2 * max_reorg_depth as usize);
-
         Ok(Self {
             externals,
             block_chain_id_generator: 0,
@@ -142,7 +135,7 @@ impl<DB: Database, C: Consensus, EF: ExecutorFactory> BlockchainTree<DB, C, EF> 
                 BTreeMap::from_iter(last_canonical_hashes.into_iter()),
             ),
             config,
-            new_block_notication_sender,
+            new_block_notification_sender,
         })
     }
 
@@ -591,7 +584,7 @@ impl<DB: Database, C: Consensus, EF: ExecutorFactory> BlockchainTree<DB, C, EF> 
         // Broadcast new canonical blocks.
         headers.into_iter().for_each(|header| {
             // ignore if receiver is dropped.
-            let _ = self.new_block_notication_sender.send(header);
+            let _ = self.new_block_notification_sender.send(header);
         });
 
         Ok(())
@@ -601,7 +594,7 @@ impl<DB: Database, C: Consensus, EF: ExecutorFactory> BlockchainTree<DB, C, EF> 
     ///
     /// Note: Only canonical blocks are send.
     pub fn subscribe_new_blocks(&self) -> NewBlockNotifications {
-        self.new_block_notication_sender.subscribe()
+        self.new_block_notification_sender.subscribe()
     }
 
     /// Canonicalize the given chain and commit it to the database.
@@ -657,11 +650,6 @@ impl<DB: Database, C: Consensus, EF: ExecutorFactory> BlockchainTree<DB, C, EF> 
         tx.commit()?;
 
         Ok(Chain::new(blocks_and_execution))
-    }
-
-    /// Return best known canonical tip
-    pub fn canonical_tip(&self) -> BlockNumHash {
-        self.block_indices.canonical_tip()
     }
 }
 
@@ -723,6 +711,8 @@ mod tests {
         block_to_chain: Option<HashMap<BlockHash, BlockChainId>>,
         /// Check fork to child index
         fork_to_child: Option<HashMap<BlockHash, HashSet<BlockHash>>>,
+        /// Pending blocks
+        pending_blocks: Option<(BlockNumber, HashSet<BlockHash>)>,
     }
 
     impl TreeTester {
@@ -742,6 +732,14 @@ mod tests {
             self
         }
 
+        fn with_pending_blocks(
+            mut self,
+            pending_blocks: (BlockNumber, HashSet<BlockHash>),
+        ) -> Self {
+            self.pending_blocks = Some(pending_blocks);
+            self
+        }
+
         fn assert<DB: Database, C: Consensus, EF: ExecutorFactory>(
             self,
             tree: &BlockchainTree<DB, C, EF>,
@@ -754,6 +752,11 @@ mod tests {
             }
             if let Some(fork_to_child) = self.fork_to_child {
                 assert_eq!(*tree.block_indices.fork_to_child(), fork_to_child);
+            }
+            if let Some(pending_blocks) = self.pending_blocks {
+                let (num, hashes) = tree.block_indices.pending_blocks();
+                let hashes = hashes.into_iter().collect::<HashSet<_>>();
+                assert_eq!((num, hashes), pending_blocks);
             }
         }
     }
@@ -774,7 +777,8 @@ mod tests {
 
         // make tree
         let config = BlockchainTreeConfig::new(1, 2, 3);
-        let mut tree = BlockchainTree::new(externals, config).expect("failed to create tree");
+        let mut tree = BlockchainTree::new(externals, NewBlockNotificationSink::new(10), config)
+            .expect("failed to create tree");
         let mut new_block_notification = tree.subscribe_new_blocks();
 
         // genesis block 10 is already canonical
@@ -818,6 +822,7 @@ mod tests {
             .with_chain_num(1)
             .with_block_to_chain(HashMap::from([(block1.hash, 0), (block2.hash, 0)]))
             .with_fork_to_child(HashMap::from([(block1.parent_hash, HashSet::from([block1.hash]))]))
+            .with_pending_blocks((block1.number, HashSet::from([block1.hash])))
             .assert(&tree);
 
         // make block1 canonical
@@ -862,6 +867,7 @@ mod tests {
                 block1.parent_hash,
                 HashSet::from([block1a_hash]),
             )]))
+            .with_pending_blocks((block2.number + 1, HashSet::from([])))
             .assert(&tree);
 
         assert_eq!(tree.insert_block_with_senders(block2a.clone()), Ok(BlockStatus::Accepted));
@@ -881,6 +887,7 @@ mod tests {
                 (block1.parent_hash, HashSet::from([block1a_hash])),
                 (block1.hash(), HashSet::from([block2a_hash])),
             ]))
+            .with_pending_blocks((block2.number + 1, HashSet::from([])))
             .assert(&tree);
 
         // make b2a canonical
@@ -904,6 +911,7 @@ mod tests {
                 (block1.parent_hash, HashSet::from([block1a_hash])),
                 (block1.hash(), HashSet::from([block2.hash])),
             ]))
+            .with_pending_blocks((block2.number + 1, HashSet::new()))
             .assert(&tree);
 
         assert_eq!(tree.make_canonical(&block1a_hash), Ok(()));
@@ -930,6 +938,7 @@ mod tests {
                 (block1.parent_hash, HashSet::from([block1.hash])),
                 (block1.hash(), HashSet::from([block2.hash])),
             ]))
+            .with_pending_blocks((block1a.number + 1, HashSet::new()))
             .assert(&tree);
 
         // make b2 canonical
@@ -955,6 +964,7 @@ mod tests {
                 (block1.parent_hash, HashSet::from([block1a_hash])),
                 (block1.hash(), HashSet::from([block2a_hash])),
             ]))
+            .with_pending_blocks((block2.number + 1, HashSet::new()))
             .assert(&tree);
 
         // finalize b1 that would make b1a removed from tree
@@ -971,6 +981,7 @@ mod tests {
             .with_chain_num(1)
             .with_block_to_chain(HashMap::from([(block2a_hash, 4)]))
             .with_fork_to_child(HashMap::from([(block1.hash(), HashSet::from([block2a_hash]))]))
+            .with_pending_blocks((block2.number + 1, HashSet::from([])))
             .assert(&tree);
 
         // unwind canonical
@@ -992,6 +1003,7 @@ mod tests {
                 block1.hash(),
                 HashSet::from([block2a_hash, block2.hash]),
             )]))
+            .with_pending_blocks((block2.number, HashSet::from([block2.hash, block2a.hash])))
             .assert(&tree);
 
         // commit b2a
@@ -1003,7 +1015,7 @@ mod tests {
         // b2   b2a (side chain)
         // |   /
         // | /
-        // b1 (canon)
+        // b1 (finalized)
         // |
         // g1 (10)
         // |
@@ -1011,14 +1023,15 @@ mod tests {
             .with_chain_num(1)
             .with_block_to_chain(HashMap::from([(block2a_hash, 4)]))
             .with_fork_to_child(HashMap::from([(block1.hash(), HashSet::from([block2a_hash]))]))
+            .with_pending_blocks((block2.number + 1, HashSet::new()))
             .assert(&tree);
 
         // update canonical block to b2, this would make b2a be removed
         assert_eq!(tree.restore_canonical_hashes(12), Ok(()));
         // Trie state:
-        // b2 (canon)
+        // b2 (finalized)
         // |
-        // b1 (canon)
+        // b1 (finalized)
         // |
         // g1 (10)
         // |
@@ -1026,6 +1039,7 @@ mod tests {
             .with_chain_num(0)
             .with_block_to_chain(HashMap::from([]))
             .with_fork_to_child(HashMap::from([]))
+            .with_pending_blocks((block2.number + 1, HashSet::from([])))
             .assert(&tree);
     }
 }
